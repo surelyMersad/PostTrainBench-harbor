@@ -1,19 +1,14 @@
 #!/bin/bash
-unset ANTHROPIC_API_KEY
 unset GEMINI_API_KEY
+unset CODEX_API_KEY
 
-# Clear API keys so the CLI uses the ChatGPT Pro auth from auth.json
-export CODEX_API_KEY=""
-export OPENAI_API_KEY=""
-
-# Force ChatGPT auth method (not API key)
-if ! grep -q "forced_login_method" ~/.codex/config.toml 2>/dev/null; then
-    printf '\nforced_login_method = "chatgpt"\n' >> ~/.codex/config.toml
-fi
+export BASH_MAX_TIMEOUT_MS="36000000"
 
 MIN_REMAINING_MINUTES=30
 
-printf '%s' "$PROMPT" | codex --search exec --json -c model_reasoning_summary=detailed --skip-git-repo-check --yolo --model "$AGENT_CONFIG"
+printf '%s' "$PROMPT" | claude --print --verbose --model "$AGENT_CONFIG" \
+    --output-format stream-json --thinking-display summarized \
+    --dangerously-skip-permissions
 
 # Re-prompt loop: if the agent finishes early, resume the session
 while true; do
@@ -32,5 +27,7 @@ while true; do
 
     CONTINUATION_PROMPT="You still have ${REMAINING_HOURS}h ${REMAINING_MINS}m remaining. Please continue improving your result and maximize performance."
 
-    printf '%s' "$CONTINUATION_PROMPT" | codex --search exec resume --last --json -c model_reasoning_summary=detailed --skip-git-repo-check --yolo --model "$AGENT_CONFIG" -
+    printf '%s' "$CONTINUATION_PROMPT" | claude --print --verbose --continue --model "$AGENT_CONFIG" \
+        --output-format stream-json --thinking-display summarized \
+        --dangerously-skip-permissions
 done
