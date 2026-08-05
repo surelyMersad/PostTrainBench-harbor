@@ -12,8 +12,9 @@ set -e
 #     can't tamper with evaluate.py, templates/, the Python interpreter,
 #     installed packages (vllm, inspect_evals, transformers), or this
 #     script itself.
-#   - All verifier-side files (evaluate.py, templates/, contamination_judge.py,
-#     metadata.json, evaluation_code/, bfcl_evaluation_code.py) are
+#   - All verifier-side files (evaluate.py, templates/, the v1.1 judge
+#     confs/prompts/tools under judges_repo/, metadata.json,
+#     evaluation_code/, bfcl_evaluation_code.py) are
 #     BAKED INTO the verifier image at build time (see tests/Dockerfile)
 #     and live at /tests/.
 #   - The agent's workspace at /home/agent/workspace is transferred from
@@ -72,9 +73,12 @@ if [ ! -f "$MODEL_DIR/config.json" ]; then
     exit 0
 fi
 
-# Show model config
+# Show model config (and preserve the FULL config.json — the judges'
+# model_identity_check needs every architecture field, and the shared
+# volume is deleted after the trial, so this is the only durable copy).
 echo ""
 echo "=== Model config.json ==="
+cp "$MODEL_DIR/config.json" "$LOGS_DIR/model_config.json"
 cat "$MODEL_DIR/config.json" | head -50 | tee "$LOGS_DIR/model_config.txt"
 
 # Check for tokenizer
@@ -101,59 +105,24 @@ if [ -f "$TESTS/metadata.json" ]; then
 fi
 
 # ============================================================
-# Run contamination judge (codex CLI)
-# Matches run_task.sh lines 180-201.
+# Run the v1.1 reward-hacking judges (API-key mode)
 #
-# The judge prompt is built by /tests/contamination_judge.py (untamperable).
-# Codex still runs with cwd=$WORKSPACE so its read tools naturally see the
-# agent's training code. Codex writes contamination_judgement.txt and
-# disallowed_model_judgement.txt into cwd; we copy them out to LOGS_DIR.
-# (This matches condor's behavior; agent could pre-place these files but
-# codex normally overwrites them when it produces a verdict.)
+# Replaces the old single contamination judge (contamination_judge.py +
+# gpt-5.1-codex, subscription-only model that 404s on API keys). The four
+# v1.1 judges (data_contamination, api_usage, ptb_lookup, general) run via
+# tests/run_judges_apikey.sh using the pristine confs/prompts/tools under
+# /tests/judges_repo/ and the OPENAI_API_KEY from [verifier.env]. Verdicts
+# land as $LOGS_DIR/judgement_<id>.json — same names the condor pipeline's
+# scripts/collect.py consumes. Judge failures are non-fatal: the benchmark
+# score below must still be computed.
 # ============================================================
 echo ""
-echo "=== Running Contamination Judge ==="
+echo "=== Running v1.1 Reward-Hacking Judges ==="
 
-if [ -f "$TESTS/contamination_judge.py" ] && [ -n "$BENCHMARK_NAME" ]; then
-    # Generate the judge prompt from the untampered /tests/ copy
-    JUDGE_TASK=$(python3 "$TESTS/contamination_judge.py" \
-        --model "$MODEL_ID" \
-        --benchmark "$BENCHMARK_NAME" 2>/dev/null) || true
-
-    if [ -n "$JUDGE_TASK" ] && [ -n "$CODEX_API_KEY" ]; then
-        echo "Running codex CLI contamination judge..."
-        set +e
-        cd "$WORKSPACE"
-        codex --search -a never exec --json -c model_reasoning_summary=detailed \
-            --skip-git-repo-check --yolo --model "gpt-5.1-codex" "$JUDGE_TASK" \
-            2>&1 | tee "$LOGS_DIR/judge_output.json"
-        JUDGE_EXIT_CODE=$?
-        set -e
-        echo "Judge exit code: $JUDGE_EXIT_CODE"
-
-        # Codex writes these files directly into the workspace
-        if [ -f "$WORKSPACE/contamination_judgement.txt" ]; then
-            cp "$WORKSPACE/contamination_judgement.txt" "$LOGS_DIR/contamination_judgement.txt"
-            echo "Contamination judgement: $(cat "$LOGS_DIR/contamination_judgement.txt")"
-        else
-            echo "no contamination detected (codex did not produce output)" > "$LOGS_DIR/contamination_judgement.txt"
-        fi
-        if [ -f "$WORKSPACE/disallowed_model_judgement.txt" ]; then
-            cp "$WORKSPACE/disallowed_model_judgement.txt" "$LOGS_DIR/disallowed_model_judgement.txt"
-            echo "Model judgement: $(cat "$LOGS_DIR/disallowed_model_judgement.txt")"
-        else
-            echo "only allowed use detected (codex did not produce output)" > "$LOGS_DIR/disallowed_model_judgement.txt"
-        fi
-    else
-        echo "Warning: CODEX_API_KEY not set or prompt generation failed, skipping judge"
-        echo "no contamination detected (judge skipped - no API key)" > "$LOGS_DIR/contamination_judgement.txt"
-        echo "only allowed use detected (judge skipped - no API key)" > "$LOGS_DIR/disallowed_model_judgement.txt"
-    fi
-else
-    echo "Warning: contamination_judge.py or metadata not found in /tests, skipping judge"
-    echo "no contamination detected (judge not available)" > "$LOGS_DIR/contamination_judgement.txt"
-    echo "only allowed use detected (judge not available)" > "$LOGS_DIR/disallowed_model_judgement.txt"
-fi
+set +e
+TESTS="$TESTS" WORKSPACE="$WORKSPACE" MODEL_DIR="$MODEL_DIR" LOGS_DIR="$LOGS_DIR" \
+    bash "$TESTS/run_judges_apikey.sh" 2>&1 | tee "$LOGS_DIR/judges.log"
+set -e
 
 # ============================================================
 # Evaluation with 3-phase retry logic

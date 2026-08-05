@@ -52,9 +52,15 @@ RUN uv pip install --system --no-cache -r /opt/requirements-direct.txt
 
 RUN uv pip install --system --no-cache flash-attn==2.8.3 --no-build-isolation
 
-# Codex CLI (contamination judge). Other agent CLIs deliberately omitted —
+# Codex CLI (judges). Other agent CLIs deliberately omitted —
 # the verifier doesn't run an agent.
 RUN npm install -g @openai/codex@0.98.0
+
+# Pinned codex release for the general_judge (JUDGE_CODEX_VERSION in
+# src/judges/general_judge/judge.conf). Baked so the judge phase never
+# depends on npm at grading time; run_judges_apikey.sh picks it up at
+# /opt/codex-cli-<version>/bin/codex.
+RUN npm install -g --prefix /opt/codex-cli-0.144.5 --no-fund --no-audit @openai/codex@0.144.5
 
 RUN mkdir -p /opt && \
     cd /opt && \
@@ -90,6 +96,6 @@ RUN rm -f /tests/Dockerfile \
           /tests/entrypoint.sh \
           /tests/system_monitor.sh \
           /tests/requirements-direct.txt && \
-    chmod +x /tests/test.sh
+    chmod +x /tests/test.sh /tests/run_judges_apikey.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

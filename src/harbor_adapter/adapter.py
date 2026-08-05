@@ -249,8 +249,73 @@ fi
         # training.
         self._copy_eval_files(env_dir, benchmark_id, model_info, benchmark_info)
 
+        # Agent-side decontamination kit (v1.1): the same n-gram checker the
+        # judges use + the benchmark test set, relocated by the Dockerfile to
+        # /home/agent (outside the workspace). The judge phase re-copies
+        # pristine versions, so agent edits cannot affect judging.
+        shutil.copy(
+            self.posttrainbench_root / "src" / "judges" / "judge_tools" / "contamination_check.py",
+            env_dir / "contamination_check.py",
+        )
+        shutil.copy(self._require_test_data(benchmark_id), env_dir / "test_data.json")
+
         # timer.sh — agent reads it during the run. Verifier doesn't need it.
         self.generate_timer_sh(env_dir)
+
+    def _require_test_data(self, benchmark_id: str) -> Path:
+        """Path to the benchmark's test_data.json; hard error when absent.
+
+        Mirrors upstream run_task.sh, which hard-errors when a benchmark
+        lacks test_data.json (the decontamination tooling and the
+        contamination judge both depend on it). The file is generated, not
+        committed: run
+            python src/judges/test_data_download/download_test_data.py --tasks <benchmark>
+        """
+        test_data = (
+            self.posttrainbench_root / "src" / "eval" / "tasks" / benchmark_id / "test_data.json"
+        )
+        if not test_data.is_file():
+            raise FileNotFoundError(
+                f"{test_data} not found — required for the v1.1 decontamination "
+                "tooling and judges. Generate it first:\n"
+                f"  python src/judges/test_data_download/download_test_data.py --tasks {benchmark_id}"
+            )
+        return test_data
+
+    def _copy_judges_repo(self, tests_dir: Path, benchmark_id: str) -> None:
+        """Bake the v1.1 judge system into the verifier build context.
+
+        get_judge_prompt.py resolves REPO_ROOT as judges/../.., and reads
+        src/eval/tasks/<benchmark>/info.json from there — so we replicate a
+        minimal repo layout under tests/judges_repo/ and the script runs
+        unmodified inside the verifier container.
+        """
+        judges_src = self.posttrainbench_root / "src" / "judges"
+        repo_dst = tests_dir / "judges_repo"
+        judges_dst = repo_dst / "src" / "judges"
+        if judges_dst.exists():
+            shutil.rmtree(repo_dst)
+        judges_dst.parent.mkdir(parents=True, exist_ok=True)
+
+        # Judge confs + prompts + prompt generator + deterministic tools.
+        # The condor-only machinery (judge_lib.sh apptainer wrappers, rerun/,
+        # test_data_download/) is intentionally excluded.
+        judges_dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy(judges_src / "get_judge_prompt.py", judges_dst / "get_judge_prompt.py")
+        shutil.copytree(judges_src / "judge_tools", judges_dst / "judge_tools")
+        for judge_dir in judges_src.iterdir():
+            if judge_dir.is_dir() and (judge_dir / "judge.conf").is_file():
+                shutil.copytree(judge_dir, judges_dst / judge_dir.name)
+
+        # info.json at the repo-relative path get_judge_prompt.py expects.
+        info_src = self.posttrainbench_root / "src" / "eval" / "tasks" / benchmark_id / "info.json"
+        if not info_src.is_file():
+            raise FileNotFoundError(
+                f"{info_src} not found — required by get_judge_prompt.py for the v1.1 judges."
+            )
+        info_dst = repo_dst / "src" / "eval" / "tasks" / benchmark_id / "info.json"
+        info_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(info_src, info_dst)
 
     def _copy_build_context_support(self, target_dir: Path) -> None:
         """Copy entrypoint.sh + system_monitor.sh + requirements-direct.txt
@@ -393,6 +458,11 @@ fi
         shutil.copy(test_sh_src, test_sh_dst)
         test_sh_dst.chmod(0o755)
 
+        # v1.1 judge runner (API-key mode) — invoked by test.sh.
+        runner_dst = tests_dir / "run_judges_apikey.sh"
+        shutil.copy(TEMPLATE_DIR / "tests" / "run_judges_apikey.sh", runner_dst)
+        runner_dst.chmod(0o755)
+
         # Build-context support files (same set the agent env needs).
         self._copy_build_context_support(tests_dir)
 
@@ -400,6 +470,12 @@ fi
         # environment/, but the verifier reads from /tests/ where these
         # land via the verifier Dockerfile's `COPY .`).
         self._copy_eval_files(tests_dir, benchmark_id, model_info, benchmark_info)
+
+        # v1.1 judge system: confs/prompts/tools under judges_repo/ (pristine
+        # copies the judges run from), plus the benchmark test set the
+        # contamination judge re-copies over the agent's version.
+        self._copy_judges_repo(tests_dir, benchmark_id)
+        shutil.copy(self._require_test_data(benchmark_id), tests_dir / "test_data.json")
 
     def generate_task(
         self,

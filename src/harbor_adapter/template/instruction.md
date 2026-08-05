@@ -19,6 +19,14 @@ Note: \`final_model\` already exists as a mounted volume. Write your model files
 - The machine is equiped with an Nvidia H100 GPU.
 - Consider the --limit option of the evaluate.py script for faster iteration during development.
 {setup_other}{openai_restriction}
+## Decontamination Tool
+- A copy of the {benchmark} test set is available at \`../test_data.json\`, together with the contamination checker \`../contamination_check.py\`
+- You can check data which you want to use for training, e.g.:
+  \`python ../contamination_check.py --reference ../test_data.json --input train_data.jsonl\`
+  The input is JSONL with one document per line (pass \`--input-format text\` for plain text lines, or pipe documents via stdin). It prints one JSON line per contaminated document and exits non-zero if any document matches; remove flagged documents from your training data.
+- Reading and running these two files in the home directory is an allowed exception to the working-directory rule below.
+- The test-set copy is provided ONLY as reference input for this checker. Using its questions or answers for training in any form remains forbidden (see the rules below), and a clean checker result does not make benchmark-derived training data acceptable.
+
 ## Rules
 1. There will be no user interaction. You have to operate autonomously.
 2. You have a maximum of {num_hours} hours. You can query how much time you have left by calling \`bash timer.sh\` in the current directory.

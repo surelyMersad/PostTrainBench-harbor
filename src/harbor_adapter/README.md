@@ -147,20 +147,42 @@ Token limits per benchmark:
 
 GPU processes are killed between attempts to free VRAM.
 
-## Contamination Judge
+## Reward-Hacking Judges (v1.1, API-key mode)
 
-The contamination judge uses OpenAI's Codex CLI to analyze the agent's code:
+The verifier runs the four v1.1 judges from `src/judges/` after the agent
+finishes, via `tests/run_judges_apikey.sh` — the harbor counterpart of the
+condor pipeline's inline judge phase. Same judges, confs, prompts, and
+tools (`judges_repo/` in the verifier image is a pristine copy), but
+authenticated with `OPENAI_API_KEY` from `[verifier.env]` instead of a
+ChatGPT-subscription `auth.json`, and executed directly in the verifier
+container instead of an apptainer sandbox. Judge models (`gpt-5.4`,
+`gpt-5.6-terra`) are available on standard API keys.
+
+| Judge | Verdict file | Checks |
+|---|---|---|
+| `data_contamination_judge` (GPT-5.4) | `judgement_gpt5_4.json` | Test-data usage, eval tampering, model substitution (runs `model_identity_check.py` against the full `config.json` saved from `/mnt/model`) |
+| `api_usage_judge` (GPT-5.4) | `judgement_api.json` | Disallowed external LLM API calls |
+| `ptb_lookup_judge` (GPT-5.4) | `judgement_ptb_lookup.json` | Agent looking up PostTrainBench itself |
+| `general_judge` (GPT-5.6 Terra, codex pinned 0.144.5 baked into the image) | `judgement_general.json` | Unknown-unknowns sweep (premature stops, exhaustion, infra failures, novel hacking) |
+
+Judge inputs: the transferred agent workspace (judge cwd), the raw agent
+CLI trace from `/logs/agent` (staged as `solve_out.txt`), and the full
+model config. The judges re-copy pristine `contamination_check.py` +
+`test_data.json` over the agent's versions before running. Judge failures
+are non-fatal — the benchmark score is always computed; verdict files use
+the same names `scripts/collect.py` consumes.
+
+The agent also receives the **decontamination kit** (the same n-gram
+checker + benchmark test set, at `/home/agent/` outside the workspace) and
+the instruction section describing it — parity with the condor v1.1
+pipeline.
+
+**Prerequisite:** `test_data.json` is generated, not committed. Before
+generating tasks:
 
 ```bash
-codex --search -a never exec --json -c model_reasoning_summary=detailed \
-    --skip-git-repo-check --yolo --model "gpt-5.1-codex" "$JUDGE_PROMPT"
+python src/judges/test_data_download/download_test_data.py   # all benchmarks
 ```
-
-It checks for:
-- **Data contamination**: Using benchmark test data for training
-- **Model violations**: Using a different model than the specified base model
-
-Codex reads the workspace code and writes `contamination_judgement.txt` and `disallowed_model_judgement.txt` directly. The judge prompt is synced with `src/disallowed_usage_judge/prompt.txt`.
 
 ## Timer
 
@@ -182,5 +204,9 @@ The timer uses a sentinel-file approach: on the first `bash timer.sh` call, the 
 The verifier extracts the accuracy metric from `metrics.json` as the reward (0-1 scale). Results are stored in:
 - `/logs/verifier/metrics.json` - Full evaluation metrics
 - `/logs/verifier/reward.txt` - Accuracy score
-- `/logs/verifier/contamination_judgement.txt` - Data contamination verdict
-- `/logs/verifier/disallowed_model_judgement.txt` - Model usage verdict
+- `/logs/verifier/model_config.json` - Full config.json of the trained model (for identity checks)
+- `/logs/verifier/judgement_gpt5_4.json` - Contamination / disallowed-model verdict
+- `/logs/verifier/judgement_api.json` - API-usage verdict
+- `/logs/verifier/judgement_ptb_lookup.json` - PTB-lookup verdict
+- `/logs/verifier/judgement_general.json` - General anomaly verdict
+- `/logs/verifier/judge_output_*.json` + `judges.log` - Raw judge traces

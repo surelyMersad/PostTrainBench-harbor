@@ -103,6 +103,12 @@ timeout_sec = 36000.0
 # The contamination judge in test.sh reads the agent's code via
 # `cd $WORKSPACE && codex exec ...` — the workspace transfer supplies
 # everything under /home/agent/workspace/ minus the excludes below.
+# Raw agent CLI trace: judge input (solve_out.txt) in the separate
+# verifier. Small text files.
+[[artifacts]]
+source = "/logs/agent"
+destination = "agent_logs"
+
 [[artifacts]]
 source = "/home/agent/workspace"
 destination = "workspace"

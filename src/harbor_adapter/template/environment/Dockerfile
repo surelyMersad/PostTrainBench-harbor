@@ -87,13 +87,23 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/system_monitor.sh
 RUN mkdir -p /home/agent/workspace
 WORKDIR /home/agent/workspace
 
+# Agent-side decontamination kit at /home/agent (OUTSIDE the agent-writable
+# workspace), mirroring condor's home-dir placement: the agent screens its
+# training data with the same checker the judges use, but the judge phase
+# re-copies pristine versions, so agent edits here can't affect judging.
+COPY contamination_check.py /home/agent/contamination_check.py
+COPY test_data.json /home/agent/test_data.json
+
 # Task files. The Dockerfile is excluded via .dockerignore. entrypoint.sh,
-# system_monitor.sh, and requirements-direct.txt land here too via `COPY .`,
-# but they're container-internal — strip them from the workspace.
+# system_monitor.sh, requirements-direct.txt, and the decon kit land here
+# too via `COPY .`, but they're container-internal / home-dir files — strip
+# them from the workspace.
 COPY . /home/agent/workspace/
 RUN rm -f /home/agent/workspace/entrypoint.sh \
           /home/agent/workspace/system_monitor.sh \
-          /home/agent/workspace/requirements-direct.txt
+          /home/agent/workspace/requirements-direct.txt \
+          /home/agent/workspace/contamination_check.py \
+          /home/agent/workspace/test_data.json
 
 RUN chmod -R a+rw /home/agent/workspace/ && \
     chmod +x /home/agent/workspace/timer.sh
