@@ -58,6 +58,9 @@ environment_mode = "separate"
 [verifier.env]
 OPENAI_API_KEY = "${OPENAI_API_KEY}"
 CODEX_API_KEY = "${OPENAI_API_KEY}"
+# Gated HF datasets (gpqamain's Idavidrein/gpqa; gemma tokenizer fallbacks)
+# are re-downloaded inside the verifier at eval time.
+HF_TOKEN = "${HF_TOKEN}"
 
 # Verifier container resources. Same as agent env so vllm + flash-attn
 # behave the same (model loading, batch sizes, etc.).
