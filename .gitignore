@@ -251,3 +251,6 @@ posttrainbench-website/
 
 # HTCondor scheduler logs from rerun_specific_runs.sh submissions
 src/disallowed_usage_judge/rerun_judge/rerun_specific_runs_logs/
+
+# Local harbor job configs (run parameters stay out of the repo)
+src/harbor_adapter/configs/
