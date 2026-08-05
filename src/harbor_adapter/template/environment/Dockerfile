@@ -55,6 +55,13 @@ RUN npm install -g \
     @google/gemini-cli@0.18.4 \
     opencode-ai@1.1.59
 
+# xAI Grok Build CLI, pinned (for harbor's `grok-build` scaffold). Installs to
+# /root/.grok/bin; harbor's agent exports that PATH at exec time and skips
+# reinstalling when this exact version is already present, so baking the pin
+# makes runs reproducible without a runtime dependency on x.ai's installer.
+RUN curl -fsSL https://x.ai/cli/install.sh | bash -s 0.2.118 && \
+    /root/.grok/bin/grok --version
+
 RUN mkdir -p /opt && \
     cd /opt && \
     git clone https://github.com/UKGovernmentBEIS/inspect_evals.git && \
