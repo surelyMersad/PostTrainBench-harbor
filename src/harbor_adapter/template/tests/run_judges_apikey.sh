@@ -67,13 +67,26 @@ else
     echo "run_judges_apikey: WARNING no $MODEL_DIR/config.json (no model?)"
 fi
 
-# Raw agent trace: largest /logs/agent/*.txt (the active CLI's log; the
-# other per-CLI tee targets are empty). Judges read solve_parsed.txt with a
-# documented fallback to solve_out.txt — harbor provides the raw trace.
+# Raw agent trace: largest /logs/agent/*.txt (the active CLI's log; the other
+# per-CLI tee targets are empty). The judges read the trace at
+# ../solve_parsed.txt (documented fallback ../solve_out.txt) relative to their
+# cwd ($WORKSPACE), i.e. from $HOME_DIR — the same result-dir-relative layout
+# as upstream run_task.sh (solve_*.txt sit beside the task/ workspace, not
+# inside it). Place both files there, then run PostTrainBench's parse_trace.py
+# to produce solve_parsed.txt exactly as upstream does: grok-build has no
+# structured parser, so parse_trace copies the raw trace verbatim (its
+# historical fallback), giving the judges the identical input they'd get
+# upstream — and auto-upgrading if upstream ever adds a grok parser.
+# (parse_trace's sanitize step wants a repo .env the verifier lacks and exits
+# non-zero AFTER solve_parsed.txt is written; the `|| true` + existence guard
+# keep that harmless and never block judging.)
 TRACE=$(ls -S /logs/agent/*.txt 2>/dev/null | head -1 || true)
 if [ -n "$TRACE" ] && [ -s "$TRACE" ]; then
-    cp "$TRACE" "$WORKSPACE/solve_out.txt"
-    echo "run_judges_apikey: using $(basename "$TRACE") as solve_out.txt"
+    cp "$TRACE" "$HOME_DIR/solve_out.txt"
+    python3 "$TESTS/trace_parsing/parse_trace.py" --agent grok-build \
+        "$HOME_DIR/solve_out.txt" -o "$HOME_DIR/solve_parsed.txt" 2>/dev/null || true
+    [ -s "$HOME_DIR/solve_parsed.txt" ] || cp "$HOME_DIR/solve_out.txt" "$HOME_DIR/solve_parsed.txt"
+    echo "run_judges_apikey: using $(basename "$TRACE") as solve_out.txt + solve_parsed.txt"
 else
     echo "run_judges_apikey: WARNING no agent trace found under /logs/agent"
 fi
@@ -118,14 +131,22 @@ for judge in "${ALL_JUDGES[@]}"; do
         echo "  prompt generation failed — skipping $judge"; continue; }
 
     rm -f "$WORKSPACE/judgement.json"
+    # </dev/null is load-bearing: harbor's exec channel holds stdin open
+    # forever, and codex exec blocks reading a non-TTY stdin until EOF
+    # ("Reading additional input from stdin...") — without the redirect the
+    # judge hangs until the verifier's 3h cap kills the whole trial
+    # (observed live 2026-08-06). timeout is defense-in-depth: judges are
+    # fail-open, so a killed judge costs a verdict, never the score.
     (
         cd "$WORKSPACE"
-        "$codex_bin" --search -a never exec --json \
+        timeout 2700 "$codex_bin" --search -a never exec --json \
             -c model_reasoning_summary=detailed \
             -c model_reasoning_effort="$JUDGE_EFFORT" \
-            --skip-git-repo-check --yolo --model "$JUDGE_MODEL" "$PROMPT"
+            --skip-git-repo-check --yolo --model "$JUDGE_MODEL" "$PROMPT" \
+            </dev/null
     ) > "$LOGS_DIR/judge_output_${JUDGE_OUTPUT_ID}.json" 2>&1
     rc=$?
+    [ "$rc" = 124 ] && echo "  WARNING: $judge timed out after 2700s (killed; fail-open)"
     echo "  codex exit: $rc"
 
     if [ -f "$WORKSPACE/judgement.json" ]; then

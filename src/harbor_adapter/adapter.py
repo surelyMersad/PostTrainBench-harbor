@@ -141,10 +141,16 @@ class PostTrainBenchAdapter:
             f"timeout_sec = {float(agent_timeout)}"
         )
 
-        # For arenahardwriting/healthbench, agents need OPENAI_API_KEY
-        # during their run (to run evaluate.py which uses OpenAI judge)
+        # For arenahardwriting/healthbench, the agent needs OPENAI_API_KEY during
+        # its run so it can self-score checkpoints with evaluate.py's OpenAI judge
+        # (mirrors upstream info.json required_api_keys). This MUST live under
+        # [environment.env]: harbor injects that table into the agent sandbox
+        # (environments/modal.py resolves task_env_config.env), whereas a bare
+        # [agent.env] maps to AgentConfig, which has no env field and is silently
+        # dropped — the cause of the "OPENAI_API_KEY is not set" failures that
+        # invalidated the healthbench/arenahardwriting columns in the 2026-08-06 run.
         if benchmark_id in ("arenahardwriting", "healthbench"):
-            content += '\n[agent.env]\nOPENAI_API_KEY = "${OPENAI_API_KEY}"\n'
+            content += '\n[environment.env]\nOPENAI_API_KEY = "${OPENAI_API_KEY}"\n'
 
         target_path.write_text(content)
 
@@ -161,20 +167,52 @@ class PostTrainBenchAdapter:
 
         content = template_path.read_text()
 
+        # Decontamination Tool section — always present (every PTB task ships a
+        # test_data.json, so the checker + test-set copy are always in the agent
+        # sandbox home). Mirrors upstream src/eval/general/get_prompt.py; the
+        # benchmark name is interpolated here so the block does not depend on the
+        # later {benchmark} pass.
+        decontamination_tool = (
+            "\n## Decontamination Tool\n"
+            f"- A copy of the {benchmark_info.benchmark_name} test set is available at "
+            "\\`../test_data.json\\`, together with the contamination checker "
+            "\\`../contamination_check.py\\`\n"
+            "- You can check data which you want to use for training, e.g.:\n"
+            "  \\`python ../contamination_check.py --reference ../test_data.json --input train_data.jsonl\\`\n"
+            "  The input is JSONL with one document per line (pass \\`--input-format text\\` for "
+            "plain text lines, or pipe documents via stdin). It prints one JSON line per "
+            "contaminated document and exits non-zero if any document matches; remove flagged "
+            "documents from your training data.\n"
+            "- Reading and running these two files in the home directory is an allowed exception "
+            "to the working-directory rule below.\n"
+            "- The test-set copy is provided ONLY as reference input for this checker. Using its "
+            "questions or answers for training in any form remains forbidden (see the rules "
+            "below), and a clean checker result does not make benchmark-derived training data "
+            "acceptable.\n"
+        )
+        content = content.replace("{decontamination_tool}", decontamination_tool)
+
+        # Rule 10 (eval_api_note): benchmarks whose grading needs a provider key
+        # (healthbench/arenahardwriting need OPENAI_API_KEY) get an exception to
+        # rule 9, permitting that key for evaluation only. Mirrors upstream
+        # get_prompt.py; the key is provisioned into the agent env by
+        # generate_task_toml for the same two benchmarks.
+        if benchmark_id in ("arenahardwriting", "healthbench"):
+            content = content.replace(
+                "{eval_api_note}",
+                "10. The \\`OPENAI_API_KEY\\` in your environment is an exception to the "
+                "previous rule: it is provided so that you can run this benchmark's grading "
+                "via evaluate.py. Use it for that evaluation only, and never to generate "
+                "training data or for any other purpose.\n"
+            )
+        else:
+            content = content.replace("{eval_api_note}", "")
+
         # Fill in placeholders
         content = content.replace("{model}", model_info.model_id)
         content = content.replace("{benchmark}", benchmark_info.benchmark_name)
         content = content.replace("{num_hours}", str(self.num_hours))
         content = content.replace("{setup_other}", benchmark_info.setup_note)
-
-        # OpenAI restriction for benchmarks that provide OPENAI_API_KEY to agents
-        if benchmark_id in ("arenahardwriting", "healthbench"):
-            content = content.replace(
-                "{openai_restriction}",
-                "- IMPORTANT: You are NOT allowed to use the OpenAI API for anything but the evaluation script.\n"
-            )
-        else:
-            content = content.replace("{openai_restriction}", "")
 
         if self.include_claude_clause:
             content += CLAUDE_CLAUSE
@@ -462,6 +500,18 @@ fi
         runner_dst = tests_dir / "run_judges_apikey.sh"
         shutil.copy(TEMPLATE_DIR / "tests" / "run_judges_apikey.sh", runner_dst)
         runner_dst.chmod(0o755)
+
+        # PostTrainBench trace parser (vendored verbatim from upstream
+        # src/trace_parsing/). run_judges_apikey.sh invokes
+        # trace_parsing/parse_trace.py to produce solve_parsed.txt for the
+        # judges, matching upstream run_task.sh. grok-build has no structured
+        # parser upstream, so parse_trace copies the raw trace verbatim (its
+        # historical fallback) — auto-upgrading if upstream adds a grok parser.
+        shutil.copytree(
+            TEMPLATE_DIR / "tests" / "trace_parsing",
+            tests_dir / "trace_parsing",
+            dirs_exist_ok=True,
+        )
 
         # Build-context support files (same set the agent env needs).
         self._copy_build_context_support(tests_dir)

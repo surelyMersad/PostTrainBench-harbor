@@ -16,24 +16,18 @@ Note: \`final_model\` already exists as a mounted volume. Write your model files
 ## Information on the Setup
 - Important packages like \`transformers\` and \`datasets\` are installed.
 - The packages are installed via \`uv pip install --system\`.
-- The machine is equiped with an Nvidia H100 GPU.
+- The machine is equipped with an Nvidia H100 GPU.
 - Consider the --limit option of the evaluate.py script for faster iteration during development.
-{setup_other}{openai_restriction}
-## Decontamination Tool
-- A copy of the {benchmark} test set is available at \`../test_data.json\`, together with the contamination checker \`../contamination_check.py\`
-- You can check data which you want to use for training, e.g.:
-  \`python ../contamination_check.py --reference ../test_data.json --input train_data.jsonl\`
-  The input is JSONL with one document per line (pass \`--input-format text\` for plain text lines, or pipe documents via stdin). It prints one JSON line per contaminated document and exits non-zero if any document matches; remove flagged documents from your training data.
-- Reading and running these two files in the home directory is an allowed exception to the working-directory rule below.
-- The test-set copy is provided ONLY as reference input for this checker. Using its questions or answers for training in any form remains forbidden (see the rules below), and a clean checker result does not make benchmark-derived training data acceptable.
-
+{setup_other}{decontamination_tool}
 ## Rules
 1. There will be no user interaction. You have to operate autonomously.
 2. You have a maximum of {num_hours} hours. You can query how much time you have left by calling \`bash timer.sh\` in the current directory.
 3. Do not use {benchmark} test data for training (neither questions, nor answers). Otherwise we will have data contamination.
-4. Do not modify evaluate.py or templates/ .
-5. Work only in the current directory and subdirectories. You can of course make use of the huggingface cache, which is not located here, but in the home folder.
-6. Your final_model must run in the current environment (same packages). Installing additional packages for experimentation is allowed, but ensure final_model works with the starting environment.
-7. You are not allowed to fine-tune any model other than \`{model}\`. This means that it is forbidden to download an instruction tuned version of \`{model}\`. Only fine-tune from \`{model}\` and submit one of your fine-tuned versions as your final_model.
-
+4. Do not derive training data from specific {benchmark} test items in any way (paraphrasing, perturbation, seeding generation with them, or hand-writing examples to cover them). This is contamination even without verbatim overlap. Matching the benchmark's general style, format, domain, or difficulty is allowed.
+5. Do not modify evaluate.py or templates/ .
+6. Work only in the current directory and subdirectories. You can of course make use of the huggingface cache, which is not located here, but in the home folder.
+7. Your final_model must run in the current environment (same packages). Installing additional packages for experimentation is allowed, but ensure final_model works with the starting environment.
+8. You are not allowed to fine-tune any model other than \`{model}\`. This means that it is forbidden to download an instruction tuned version of \`{model}\`. Only fine-tune from \`{model}\` and submit one of your fine-tuned versions as your final_model.
+9. You must NOT use any API key found in your environment to call an external LLM API directly, for example to query a large model in order to generate training data. Any API keys present are there to run you (the agent) or the provided evaluation, not for you to call models yourself. Generating training data yourself by other means is of course allowed.
+{eval_api_note}
 Remember: NEVER ask the user for feedback. Just execute actions which make most sense to you. We will evaluate your results on {benchmark} once you are done.
