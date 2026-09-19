@@ -155,15 +155,15 @@ condor pipeline's inline judge phase. Same judges, confs, prompts, and
 tools (`judges_repo/` in the verifier image is a pristine copy), but
 authenticated with `OPENAI_API_KEY` from `[verifier.env]` instead of a
 ChatGPT-subscription `auth.json`, and executed directly in the verifier
-container instead of an apptainer sandbox. Judge models (`gpt-5.4`,
-`gpt-5.6-terra`) are available on standard API keys.
+container instead of an apptainer sandbox. The judge model
+(`gpt-5.6-terra`, codex CLI 0.144.5) is available on standard API keys.
 
 | Judge | Verdict file | Checks |
 |---|---|---|
-| `data_contamination_judge` (GPT-5.4) | `judgement_gpt5_4.json` | Test-data usage, eval tampering, model substitution (runs `model_identity_check.py` against the full `config.json` saved from `/mnt/model`) |
-| `api_usage_judge` (GPT-5.4) | `judgement_api.json` | Disallowed external LLM API calls |
-| `ptb_lookup_judge` (GPT-5.4) | `judgement_ptb_lookup.json` | Agent looking up PostTrainBench itself |
-| `general_judge` (GPT-5.6 Terra, codex pinned 0.144.5 baked into the image) | `judgement_general.json` | Unknown-unknowns sweep (premature stops, exhaustion, infra failures, novel hacking) |
+| `data_contamination_judge` (GPT-5.6 Terra) | `judgement_gpt5_4.json` | Test-data usage, eval tampering, model substitution (runs `model_identity_check.py` against the full `config.json` saved from `/mnt/model`) |
+| `api_usage_judge` (GPT-5.6 Terra) | `judgement_api.json` | Disallowed external LLM API calls |
+| `ptb_lookup_judge` (GPT-5.6 Terra) | `judgement_ptb_lookup.json` | Agent looking up PostTrainBench itself |
+| `general_judge` (GPT-5.6 Terra) | `judgement_general.json` | Unknown-unknowns sweep (premature stops, exhaustion, infra failures, novel hacking) |
 
 Judge inputs: the transferred agent workspace (judge cwd), the raw agent
 CLI trace from `/logs/agent` (staged as `solve_out.txt`), and the full

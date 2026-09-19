@@ -8,7 +8,7 @@
 # same judges, same confs, same prompts (via the unmodified
 # get_judge_prompt.py in judges_repo/), same judgement_<id>.json outputs —
 # but executed directly in this container (no apptainer) with the API key
-# kept in the environment (judge models gpt-5.4 / gpt-5.6-terra are
+# kept in the environment (the judge model gpt-5.6-terra is
 # API-accessible; the old subscription-only path blanked these keys).
 #
 # Layout expectations (prepared by tests/Dockerfile + adapter.py):
@@ -21,9 +21,13 @@
 #   /logs/agent/*.txt                            raw agent CLI trace (artifact transfer)
 #
 # Verdicts land in $LOGS_DIR as judgement_<id>.json; raw codex traces as
-# judge_output_<id>.json. Judge failures are non-fatal (fail-open): the
-# benchmark score must still be computed; missing verdicts are handled
-# downstream exactly like pre-judge condor runs.
+# judge_output_<id>.json. Judge failures are FAIL-OPEN, as in upstream
+# run_task.sh (collect_judge_output missing_fatal=0): a judge that crashes,
+# times out, or returns no/invalid verdict is logged and skipped, and the
+# benchmark score is still computed. Missing verdicts are backfilled by the
+# offline rerun pipeline. Two wall-clock bounds keep a hung judge (stalled API
+# stream, retry loop) from starving the eval: JUDGE_TIMEOUT_SEC per judge
+# here, and JUDGE_PHASE_TIMEOUT_SEC around the whole phase in test.sh.
 
 set -u
 
@@ -36,18 +40,86 @@ MODEL_DIR="${MODEL_DIR:-/mnt/model}"
 LOGS_DIR="${LOGS_DIR:-/logs/verifier}"
 
 ALL_JUDGES=(data_contamination_judge api_usage_judge ptb_lookup_judge general_judge)
-DEFAULT_JUDGE_MODEL="gpt-5.4"
+# Defaults mirror judge_lib.sh (JUDGE_DEFAULT_*): gpt-5.4 was retired from
+# Codex on 2026-08-31; gpt-5.6-terra needs codex CLI >= 0.144.0, which the
+# verifier image bakes at /opt/codex-cli-0.144.5.
+DEFAULT_JUDGE_MODEL="gpt-5.6-terra"
 DEFAULT_REASONING_EFFORT="xhigh"
+DEFAULT_JUDGE_CODEX_VERSION="0.144.5"
+# Per-judge wall clock. Healthy judges finish in ~12 min (max ~23 min measured
+# on the row17 sweep); 45 min is ~2x that headroom while keeping 4 judges well
+# under test.sh's phase cap. A killed judge is fail-open (no verdict).
+JUDGE_TIMEOUT_SEC="${JUDGE_TIMEOUT_SEC:-2700}"
+
+# A caller may select a comma-separated subset. The inline verifier leaves
+# this unset and runs all four; judge-only backfills can request only missing
+# verdicts without changing the prompt or invocation path.
+if [ -n "${JUDGES_CSV:-}" ]; then
+    IFS=',' read -r -a ALL_JUDGES <<< "$JUDGES_CSV"
+fi
 
 mkdir -p "$LOGS_DIR"
 
 if [ -z "${CODEX_API_KEY:-${OPENAI_API_KEY:-}}" ]; then
-    echo "run_judges_apikey: no OPENAI_API_KEY/CODEX_API_KEY — skipping all judges"
+    echo "run_judges_apikey: WARNING no OPENAI_API_KEY/CODEX_API_KEY — skipping all judges (fail-open)" >&2
     exit 0
 fi
 
 BENCHMARK_ID=$(python3 -c "import json; print(json.load(open('$TESTS/metadata.json'))['benchmark_id'])")
 MODEL_ID=$(python3 -c "import json; print(json.load(open('$TESTS/metadata.json'))['model_id'])")
+
+# API/general prompts need the research harness identity. Harbor task images
+# are agent-agnostic, so accept explicit values from the caller and otherwise
+# derive them from the transferred agent logs. For grok-build the model id is
+# recorded either as model_id="..." in the CLI log or as --model ... in the
+# watchdog launch command.
+AGENT_NAME="${PTB_AGENT_NAME:-}"
+AGENT_CONFIG="${PTB_AGENT_CONFIG:-}"
+if [ -z "$AGENT_NAME" ]; then
+    if [ -s /logs/agent/grok-build.txt ]; then
+        AGENT_NAME="grok-build"
+    else
+        agent_trace=$(find /logs/agent -maxdepth 1 -type f -name '*.txt' -size +0c \
+            -printf '%s %f\n' 2>/dev/null | sort -nr | sed -n '1p' | cut -d' ' -f2-)
+        AGENT_NAME="${agent_trace%.txt}"
+    fi
+fi
+if [ -z "$AGENT_CONFIG" ]; then
+    # Do not recurse through /logs/agent: grok session histories can be many
+    # gigabytes. The watchdog/CLI logs are tiny and record the launch model.
+    for agent_log in \
+        /logs/agent/grok-build-watchdog.log \
+        /logs/agent/grok-build-cli.log; do
+        [ -s "$agent_log" ] || continue
+        AGENT_CONFIG=$(grep -hoEm1 'model_id="[^"]+"' "$agent_log" 2>/dev/null \
+            | sed -E 's/.*model_id="([^"]+)".*/\1/' || true)
+        if [ -z "$AGENT_CONFIG" ]; then
+            AGENT_CONFIG=$(grep -hoEm1 -- '--model[ =]+[^ ]+' "$agent_log" 2>/dev/null \
+                | sed -E 's/.*--model[ =]+([^ ]+).*/\1/' || true)
+        fi
+        [ -n "$AGENT_CONFIG" ] && break
+    done
+fi
+if [ -z "$AGENT_CONFIG" ] && [ -s /logs/agent/grok-build.txt ]; then
+    # Bounded fallback for older runs that did not archive the small launcher
+    # logs. The model identity is part of the trace preamble when present.
+    AGENT_CONFIG=$(sed -n '1,400p;400q' /logs/agent/grok-build.txt \
+        | grep -oEm1 'model_id="[^"]+"|--model[ =]+[^ ]+' \
+        | sed -E 's/.*model_id="([^"]+)".*/\1/; s/.*--model[ =]+([^ ]+).*/\1/' \
+        || true)
+fi
+if [ -z "$AGENT_NAME" ] || [ -z "$AGENT_CONFIG" ]; then
+    # Fail-open: get_judge_prompt.py falls back to its generic harness clause
+    # when the agent/model are unknown (same as upstream build_judge_prompt
+    # omitting the flags), so judging proceeds with a less specific prompt.
+    echo "run_judges_apikey: WARNING could not determine agent identity " \
+         "(agent=${AGENT_NAME:-missing}, config=${AGENT_CONFIG:-missing}); " \
+         "set PTB_AGENT_NAME / PTB_AGENT_CONFIG for the specific harness clause" >&2
+fi
+echo "run_judges_apikey: agent=${AGENT_NAME:-<unknown>} agent_config=${AGENT_CONFIG:-<unknown>}"
+PROMPT_AGENT_ARGS=()
+[ -n "$AGENT_NAME" ] && PROMPT_AGENT_ARGS+=(--agent "$AGENT_NAME")
+[ -n "$AGENT_CONFIG" ] && PROMPT_AGENT_ARGS+=(--agent-config "$AGENT_CONFIG")
 
 # ------------------------------------------------------------------
 # Prepare the judge sandbox (mirrors judge_lib.sh prepare_judge_sandbox):
@@ -96,15 +168,16 @@ fi
 # ------------------------------------------------------------------
 for judge in "${ALL_JUDGES[@]}"; do
     conf="$JUDGES_DIR/$judge/judge.conf"
-    [ -f "$conf" ] || { echo "run_judges_apikey: missing $conf — skipping $judge"; continue; }
+    [ -f "$conf" ] || { echo "run_judges_apikey: WARNING missing $conf — skipping $judge" >&2; continue; }
 
     # judge.conf is simple KEY="value" lines (see upstream comment)
     JUDGE_OUTPUT_ID=$(grep -m1 '^JUDGE_OUTPUT_ID=' "$conf" | cut -d'"' -f2)
-    JUDGE_MODEL=$(grep -m1 '^JUDGE_MODEL=' "$conf" | cut -d'"' -f2)
+    JUDGE_MODEL=$(grep -m1 '^JUDGE_MODEL=' "$conf" | cut -d'"' -f2 || true)
     JUDGE_MODEL="${JUDGE_MODEL:-$DEFAULT_JUDGE_MODEL}"
-    JUDGE_EFFORT=$(grep -m1 '^JUDGE_REASONING_EFFORT=' "$conf" | cut -d'"' -f2)
+    JUDGE_EFFORT=$(grep -m1 '^JUDGE_REASONING_EFFORT=' "$conf" | cut -d'"' -f2 || true)
     JUDGE_EFFORT="${JUDGE_EFFORT:-$DEFAULT_REASONING_EFFORT}"
-    JUDGE_CODEX_VERSION=$(grep -m1 '^JUDGE_CODEX_VERSION=' "$conf" | cut -d'"' -f2)
+    JUDGE_CODEX_VERSION=$(grep -m1 '^JUDGE_CODEX_VERSION=' "$conf" | cut -d'"' -f2 || true)
+    JUDGE_CODEX_VERSION="${JUDGE_CODEX_VERSION:-$DEFAULT_JUDGE_CODEX_VERSION}"
 
     # Pinned codex releases are baked into the verifier image at
     # /opt/codex-cli-<version>/bin/codex (see tests/Dockerfile); fall back
@@ -127,33 +200,86 @@ for judge in "${ALL_JUDGES[@]}"; do
     echo "=== Judge: $judge (model=$JUDGE_MODEL, effort=$JUDGE_EFFORT, codex=$($codex_bin --version 2>/dev/null || echo '?')) ==="
 
     PROMPT=$(python3 "$JUDGES_DIR/get_judge_prompt.py" \
-        --judge "$judge" --benchmark-id "$BENCHMARK_ID" --model "$MODEL_ID" 2>"$LOGS_DIR/judge_prompt_${JUDGE_OUTPUT_ID}.err") || {
-        echo "  prompt generation failed — skipping $judge"; continue; }
+        --judge "$judge" --benchmark-id "$BENCHMARK_ID" --model "$MODEL_ID" \
+        "${PROMPT_AGENT_ARGS[@]}" \
+        2>"$LOGS_DIR/judge_prompt_${JUDGE_OUTPUT_ID}.err") || {
+        echo "  WARNING: prompt generation failed for $judge — skipping (fail-open)" >&2; continue; }
+    printf '%s\n' "$PROMPT" > "$LOGS_DIR/judge_prompt_${JUDGE_OUTPUT_ID}.txt"
 
     rm -f "$WORKSPACE/judgement.json"
     # </dev/null is load-bearing: harbor's exec channel holds stdin open
     # forever, and codex exec blocks reading a non-TTY stdin until EOF
     # ("Reading additional input from stdin...") — without the redirect the
-    # judge hangs until the verifier's 3h cap kills the whole trial
-    # (observed live 2026-08-06). timeout is defense-in-depth: judges are
-    # fail-open, so a killed judge costs a verdict, never the score.
+    # judge hangs until the verifier cap kills the whole trial (observed live
+    # 2026-08-06). `timeout` bounds a judge whose API stream stalls or loops
+    # on retries: a killed judge costs one verdict (fail-open), never the score.
     (
         cd "$WORKSPACE"
-        timeout 2700 "$codex_bin" --search -a never exec --json \
+        timeout -k 30 "$JUDGE_TIMEOUT_SEC" \
+            "$codex_bin" --search -a never exec --json \
             -c model_reasoning_summary=detailed \
             -c model_reasoning_effort="$JUDGE_EFFORT" \
             --skip-git-repo-check --yolo --model "$JUDGE_MODEL" "$PROMPT" \
             </dev/null
     ) > "$LOGS_DIR/judge_output_${JUDGE_OUTPUT_ID}.json" 2>&1
     rc=$?
-    [ "$rc" = 124 ] && echo "  WARNING: $judge timed out after 2700s (killed; fail-open)"
     echo "  codex exit: $rc"
+    if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+        echo "  WARNING: $judge timed out after ${JUDGE_TIMEOUT_SEC}s (killed; fail-open)" >&2
+    elif [ "$rc" != 0 ]; then
+        echo "  WARNING: $judge codex exited $rc (fail-open; see judge_output_${JUDGE_OUTPUT_ID}.json)" >&2
+    fi
 
     if [ -f "$WORKSPACE/judgement.json" ]; then
-        mv "$WORKSPACE/judgement.json" "$LOGS_DIR/judgement_${JUDGE_OUTPUT_ID}.json"
-        echo "  verdict: $(head -c 300 "$LOGS_DIR/judgement_${JUDGE_OUTPUT_ID}.json")"
+        # Schema check mirrors what scripts/collect.py expects. An invalid
+        # verdict is quarantined (not consumed downstream) rather than fatal.
+        if python3 - "$judge" "$WORKSPACE/judgement.json" <<'PY'
+import json
+import sys
+
+judge, path = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+schema = {
+    "data_contamination_judge": {
+        "contamination": bool,
+        "disallowed_model": bool,
+        "justification_contamination": str,
+        "justification_disallowed_model": str,
+    },
+    "api_usage_judge": {
+        "disallowed_api_usage": bool,
+        "justification_disallowed_api_usage": str,
+    },
+    "ptb_lookup_judge": {
+        "disallowed_ptb_lookup": bool,
+        "justification_disallowed_ptb_lookup": str,
+    },
+    "general_judge": {
+        "general_anomaly": bool,
+        "justification_general_anomaly": str,
+    },
+}[judge]
+if not isinstance(data, dict) or set(data) != set(schema):
+    raise SystemExit(
+        f"invalid {judge} verdict fields; expected {sorted(schema)}, "
+        f"got {sorted(data) if isinstance(data, dict) else type(data).__name__}"
+    )
+invalid = [key for key, expected in schema.items() if type(data[key]) is not expected]
+if invalid:
+    raise SystemExit(f"invalid {judge} verdict field types: {invalid}")
+PY
+        then
+            mv "$WORKSPACE/judgement.json" "$LOGS_DIR/judgement_${JUDGE_OUTPUT_ID}.json"
+            echo "  verdict: $(head -c 300 "$LOGS_DIR/judgement_${JUDGE_OUTPUT_ID}.json")"
+        else
+            mv "$WORKSPACE/judgement.json" "$LOGS_DIR/judgement_${JUDGE_OUTPUT_ID}.invalid.json"
+            echo "  WARNING: $judge verdict failed schema check — quarantined as" \
+                 "judgement_${JUDGE_OUTPUT_ID}.invalid.json (fail-open)" >&2
+        fi
     else
-        echo "  WARNING: $judge produced no judgement.json (see judge_output_${JUDGE_OUTPUT_ID}.json)"
+        echo "  WARNING: $judge produced no judgement.json " \
+             "(see judge_output_${JUDGE_OUTPUT_ID}.json); continuing — a missing" \
+             "inline verdict never aborts the run" >&2
     fi
 done
 

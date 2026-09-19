@@ -222,13 +222,13 @@ The project includes reward-hacking detection via agent-as-judge runs invoked by
 `src/judges/run_judges.sh`). Each judge is a folder under `src/judges/` with a `judge.conf`
 and a prompt template (see `src/judges/README.md`, including how to add a new judge):
 
-1. **`data_contamination_judge`** (GPT-5.4 via codex CLI, subscription auth) — checks for
+1. **`data_contamination_judge`** (GPT-5.6 Terra via codex CLI, subscription auth) — checks for
    test-data usage, eval tampering, model substitution, and forbidden fine-tuning practices.
-2. **`api_usage_judge`** (GPT-5.4 via codex CLI) — separate schema (`disallowed_api_usage`),
+2. **`api_usage_judge`** (GPT-5.6 Terra via codex CLI) — separate schema (`disallowed_api_usage`),
    checks whether the agent called external LLM APIs in a disallowed way. Its verdict
    (`judgement_api.json`) **is** consumed by scoring: a flagged run falls back to the baseline
    score in `scripts/collect.py`.
-3. **`ptb_lookup_judge`** (GPT-5.4 via codex CLI) — separate schema
+3. **`ptb_lookup_judge`** (GPT-5.6 Terra via codex CLI) — separate schema
    (`disallowed_ptb_lookup`), checks whether the agent looked up PostTrainBench itself (the
    website, the GitHub repo, or published traces of past runs, e.g. to copy strategies). Its
    verdict (`judgement_ptb_lookup.json`) is archival — it does not feed score fallback — but

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # PostTrainBench verification script
 # Runs contamination judge (codex CLI) and 3-phase evaluation with retry logic.
@@ -113,8 +113,9 @@ fi
 # tests/run_judges_apikey.sh using the pristine confs/prompts/tools under
 # /tests/judges_repo/ and the OPENAI_API_KEY from [verifier.env]. Verdicts
 # land as $LOGS_DIR/judgement_<id>.json — same names the condor pipeline's
-# scripts/collect.py consumes. Judge failures are non-fatal: the benchmark
-# score below must still be computed.
+# scripts/collect.py consumes. Judge failures are non-fatal (upstream
+# run_task.sh: missing_fatal=0): the benchmark score below must still be
+# computed.
 # ============================================================
 echo ""
 echo "=== Running v1.1 Reward-Hacking Judges ==="
@@ -122,18 +123,16 @@ echo "=== Running v1.1 Reward-Hacking Judges ==="
 # The judges are fail-open and archival — the benchmark score MUST compute no
 # matter what they do. Two layers guarantee that:
 #   1. set +e: a judge crash / non-zero exit never aborts this script.
-#   2. An overall wall-clock cap on the WHOLE judge phase. Per-judge timeouts
-#      alone are not enough: 4 judges x their individual caps can sum to the
-#      verifier's 10800s budget and starve the eval (exactly the row11
-#      VerifierTimeout failure). This single `timeout` bounds everything inside
-#      run_judges_apikey.sh — all four judges, parse_trace on a multi-GB trace,
-#      and any codex npm-install fallback — so the eval below is always left
-#      (10800 - JUDGE_PHASE_TIMEOUT_SEC) seconds. Judges killed at the cap just
-#      leave partial/absent verdicts, which the offline rerun pipeline can
-#      backfill; the score is never lost. `-k` force-kills stragglers that
-#      ignore SIGTERM.
+#   2. A wall-clock cap on the WHOLE judge phase, on top of the per-judge
+#      timeout inside run_judges_apikey.sh. Exit codes alone cannot stop a
+#      judge whose API stream hangs; only a clock can. Healthy phases take
+#      ~12 min (max ~23 min measured); 90 min is ~4x that and leaves the eval
+#      (median 36 min, max ~3h observed) the rest of the verifier budget.
+#      Judges killed at the cap leave partial/absent verdicts, which the
+#      offline rerun pipeline backfills; the score is never lost. `-k`
+#      force-kills stragglers that ignore SIGTERM.
 set +e
-JUDGE_PHASE_TIMEOUT_SEC="${JUDGE_PHASE_TIMEOUT_SEC:-3600}"
+JUDGE_PHASE_TIMEOUT_SEC="${JUDGE_PHASE_TIMEOUT_SEC:-5400}"
 TESTS="$TESTS" WORKSPACE="$WORKSPACE" MODEL_DIR="$MODEL_DIR" LOGS_DIR="$LOGS_DIR" \
     timeout -k 30 "$JUDGE_PHASE_TIMEOUT_SEC" \
     bash "$TESTS/run_judges_apikey.sh" 2>&1 | tee "$LOGS_DIR/judges.log"
@@ -141,6 +140,8 @@ judge_rc=${PIPESTATUS[0]}
 if [ "$judge_rc" = 124 ] || [ "$judge_rc" = 137 ]; then
     echo "=== WARNING: judge phase hit the ${JUDGE_PHASE_TIMEOUT_SEC}s cap and was killed; " \
          "proceeding to evaluation (judges are fail-open, verdicts backfillable) ==="
+elif [ "$judge_rc" != 0 ]; then
+    echo "=== WARNING: judge runner exited $judge_rc; proceeding to evaluation (fail-open) ==="
 fi
 set -e
 
