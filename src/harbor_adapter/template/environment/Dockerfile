@@ -59,7 +59,7 @@ RUN npm install -g \
 # /root/.grok/bin; harbor's agent exports that PATH at exec time and skips
 # reinstalling when this exact version is already present, so baking the pin
 # makes runs reproducible without a runtime dependency on x.ai's installer.
-RUN curl -fsSL https://x.ai/cli/install.sh | bash -s 0.2.118 && \
+RUN curl -fsSL https://x.ai/cli/install.sh | bash -s 1.0.0 && \
     /root/.grok/bin/grok --version
 
 RUN mkdir -p /opt && \
