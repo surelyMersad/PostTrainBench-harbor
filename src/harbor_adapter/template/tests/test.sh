@@ -79,7 +79,7 @@ fi
 echo ""
 echo "=== Model config.json ==="
 cp "$MODEL_DIR/config.json" "$LOGS_DIR/model_config.json"
-cat "$MODEL_DIR/config.json" | head -50 | tee "$LOGS_DIR/model_config.txt"
+head -50 "$MODEL_DIR/config.json" | tee "$LOGS_DIR/model_config.txt"
 
 # Check for tokenizer
 echo ""
@@ -168,13 +168,16 @@ kill_gpu_processes() {
     # In Docker/Modal, the agent's vLLM process can get reparented to PID 1,
     # which still holds GPU memory when the verifier starts. Killing PID 1
     # would destroy the entire container.
-    nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null \
-        | grep -v '^$' \
-        | while read pid; do
-            if [ "$pid" -gt 1 ] 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null || true
-            fi
-        done
+    # No pipeline here: under `set -euo pipefail`, `... | grep -v '^$' | while`
+    # aborted the whole verifier whenever the GPU had no processes (always the
+    # case in a fresh separate verifier container) because grep exited 1.
+    local pids
+    pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null || true)
+    for pid in $pids; do
+        if [ "$pid" -gt 1 ] 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
     sleep 5
 }
 
