@@ -58,6 +58,14 @@ def main():
         help="Number of hours for the training task (default: 10)",
     )
     parser.add_argument(
+        "--api-provider",
+        choices=["openai", "openrouter"],
+        default="openai",
+        help="Hosted API used for the LLM-graded benchmarks and the codex judges "
+             "(default: openai). 'openrouter' installs evaluate_openrouter.py and "
+             "passes OPENROUTER_API_KEY instead of OPENAI_API_KEY.",
+    )
+    parser.add_argument(
         "--all", "-a",
         action="store_true",
         help="Generate tasks for all benchmark + model combinations",
@@ -85,6 +93,7 @@ def main():
     adapter = PostTrainBenchAdapter(
         output_dir=args.output,
         num_hours=args.num_hours,
+        api_provider=args.api_provider,
     )
 
     if args.all:

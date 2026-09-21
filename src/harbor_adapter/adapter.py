@@ -6,6 +6,16 @@ from pathlib import Path
 ADAPTER_NAME = "POSTTRAINBENCH"
 TEMPLATE_DIR = Path(__file__).parent / "template"
 
+# Which hosted API grades the LLM-judged benchmarks (healthbench,
+# arenahardwriting) and powers the v1.1 codex judges in the verifier.
+#   openai     -> evaluate.py + OPENAI_API_KEY/CODEX_API_KEY (direct api.openai.com)
+#   openrouter -> evaluate_openrouter.py + OPENROUTER_API_KEY; the judge runner
+#                 routes codex through OpenRouter (openai/gpt-5.6-terra).
+API_PROVIDERS = ("openai", "openrouter")
+API_KEY_ENV = {"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+GRADED_BENCHMARKS = ("arenahardwriting", "healthbench")
+GRADER_API_ENV_MARKER = "# @@GRADER_API_ENV@@"
+
 # PostTrainBench source directory (relative to repo root)
 POSTTRAINBENCH_ROOT = Path(__file__).parent.parent.parent
 
@@ -102,6 +112,7 @@ class PostTrainBenchAdapter:
         output_dir: Path,
         num_hours: int = 10,
         include_claude_clause: bool = True,
+        api_provider: str = "openai",
     ):
         """
         Initialize the adapter.
@@ -110,11 +121,22 @@ class PostTrainBenchAdapter:
             output_dir: Directory where Harbor tasks will be generated.
             num_hours: Number of hours for the training task (default: 10).
             include_claude_clause: Whether to include the Claude non-interactive clause.
+            api_provider: "openai" or "openrouter" — see API_PROVIDERS.
         """
+        if api_provider not in API_PROVIDERS:
+            raise ValueError(f"api_provider must be one of {API_PROVIDERS}, got {api_provider!r}")
         self.output_dir = Path(output_dir)
         self.num_hours = num_hours
         self.include_claude_clause = include_claude_clause
+        self.api_provider = api_provider
+        self.api_key_env = API_KEY_ENV[api_provider]
         self.posttrainbench_root = POSTTRAINBENCH_ROOT
+
+    def _grader_api_env_lines(self) -> str:
+        """TOML lines that hand the verifier its grader/judge credential."""
+        if self.api_provider == "openrouter":
+            return 'OPENROUTER_API_KEY = "${OPENROUTER_API_KEY}"'
+        return 'OPENAI_API_KEY = "${OPENAI_API_KEY}"\nCODEX_API_KEY = "${OPENAI_API_KEY}"'
 
     def _read_benchmark_name(self, benchmark_id: str) -> str:
         """Read the human-readable benchmark name from benchmark.txt."""
@@ -141,16 +163,21 @@ class PostTrainBenchAdapter:
             f"timeout_sec = {float(agent_timeout)}"
         )
 
-        # For arenahardwriting/healthbench, the agent needs OPENAI_API_KEY during
-        # its run so it can self-score checkpoints with evaluate.py's OpenAI judge
+        # Verifier credential for graders + judges (provider-specific).
+        if GRADER_API_ENV_MARKER not in content:
+            raise ValueError(f"template/task.toml lacks the {GRADER_API_ENV_MARKER} marker")
+        content = content.replace(GRADER_API_ENV_MARKER, self._grader_api_env_lines())
+
+        # For arenahardwriting/healthbench, the agent needs the grader key during
+        # its run so it can self-score checkpoints with evaluate.py's LLM judge
         # (mirrors upstream info.json required_api_keys). This MUST live under
         # [environment.env]: harbor injects that table into the agent sandbox
         # (environments/modal.py resolves task_env_config.env), whereas a bare
         # [agent.env] maps to AgentConfig, which has no env field and is silently
         # dropped — the cause of the "OPENAI_API_KEY is not set" failures that
         # invalidated the healthbench/arenahardwriting columns in the 2026-08-06 run.
-        if benchmark_id in ("arenahardwriting", "healthbench"):
-            content += '\n[environment.env]\nOPENAI_API_KEY = "${OPENAI_API_KEY}"\n'
+        if benchmark_id in GRADED_BENCHMARKS:
+            content += f'\n[environment.env]\n{self.api_key_env} = "${{{self.api_key_env}}}"\n'
 
         target_path.write_text(content)
 
@@ -193,14 +220,14 @@ class PostTrainBenchAdapter:
         content = content.replace("{decontamination_tool}", decontamination_tool)
 
         # Rule 10 (eval_api_note): benchmarks whose grading needs a provider key
-        # (healthbench/arenahardwriting need OPENAI_API_KEY) get an exception to
-        # rule 9, permitting that key for evaluation only. Mirrors upstream
-        # get_prompt.py; the key is provisioned into the agent env by
-        # generate_task_toml for the same two benchmarks.
-        if benchmark_id in ("arenahardwriting", "healthbench"):
+        # (healthbench/arenahardwriting) get an exception to rule 9, permitting
+        # that key for evaluation only. Mirrors upstream get_prompt.py; the key
+        # (OPENAI_API_KEY or OPENROUTER_API_KEY per --api-provider) is provisioned
+        # into the agent env by generate_task_toml for the same two benchmarks.
+        if benchmark_id in GRADED_BENCHMARKS:
             content = content.replace(
                 "{eval_api_note}",
-                "10. The \\`OPENAI_API_KEY\\` in your environment is an exception to the "
+                f"10. The \\`{self.api_key_env}\\` in your environment is an exception to the "
                 "previous rule: it is provided so that you can run this benchmark's grading "
                 "via evaluate.py. Use it for that evaluation only, and never to generate "
                 "training data or for any other purpose.\n"
@@ -413,10 +440,17 @@ fi
           - contamination_judge.py (judge prompt builder)
           - metadata.json          (benchmark + model info for verifier)
         """
-        # evaluate.py
-        eval_src = self.posttrainbench_root / "src" / "eval" / "tasks" / benchmark_id / "evaluate.py"
+        # evaluate.py — for the LLM-graded benchmarks the OpenRouter provider
+        # uses upstream's evaluate_openrouter.py variant (same CLI, grader model
+        # slug openai/gpt-5-mini, OPENROUTER_API_KEY). It is installed under the
+        # canonical name so test.sh and the agent instructions need no change.
+        task_src = self.posttrainbench_root / "src" / "eval" / "tasks" / benchmark_id
+        eval_name = "evaluate.py"
+        if self.api_provider == "openrouter" and benchmark_id in GRADED_BENCHMARKS:
+            eval_name = "evaluate_openrouter.py"
+        eval_src = task_src / eval_name
         if not eval_src.exists():
-            raise FileNotFoundError(f"evaluate.py not found: {eval_src}")
+            raise FileNotFoundError(f"{eval_name} not found: {eval_src}")
         shutil.copy(eval_src, target_dir / "evaluate.py")
 
         # templates/
@@ -453,6 +487,7 @@ fi
             "model_id": model_info.model_id,
             "model_short_name": model_info.short_name,
             "num_hours": self.num_hours,
+            "api_provider": self.api_provider,
         }
         (target_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 

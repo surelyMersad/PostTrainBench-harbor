@@ -11,7 +11,7 @@ gpu_types = ["H100"]
 cpus = 16
 memory_mb = 131072
 storage_mb = 409600
-build_timeout_sec = 3600.0
+build_timeout_sec = 14400.0
 allow_internet = true
 
 # Healthcheck runs after entrypoint.sh comes up and before the agent starts.
@@ -56,8 +56,15 @@ timeout_sec = 10800.0
 environment_mode = "separate"
 
 [verifier.env]
-OPENAI_API_KEY = "${OPENAI_API_KEY}"
-CODEX_API_KEY = "${OPENAI_API_KEY}"
+# Grader + judge credential. adapter.py replaces the marker line below per
+# --api-provider:
+#   openrouter -> OPENROUTER_API_KEY = "${OPENROUTER_API_KEY}"   (graders use the
+#                 evaluate_openrouter.py variants, judges route codex via OpenRouter)
+#   openai     -> OPENAI_API_KEY + CODEX_API_KEY = "${OPENAI_API_KEY}"
+# Only one provider's key is ever passed: the healthbench grader prefers
+# OPENAI_API_KEY whenever it is set, so an OpenRouter key stored under that
+# name would be sent to api.openai.com and 401.
+# @@GRADER_API_ENV@@
 # Gated HF datasets (gpqamain's Idavidrein/gpqa; gemma tokenizer fallbacks)
 # are re-downloaded inside the verifier at eval time.
 HF_TOKEN = "${HF_TOKEN}"
@@ -70,7 +77,7 @@ gpu_types = ["H100"]
 cpus = 16
 memory_mb = 131072
 storage_mb = 409600
-build_timeout_sec = 3600.0
+build_timeout_sec = 14400.0
 allow_internet = true
 
 [verifier.environment.healthcheck]

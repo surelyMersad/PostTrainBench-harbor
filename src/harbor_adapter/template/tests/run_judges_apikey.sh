@@ -1,8 +1,18 @@
 #!/bin/bash
 #
 # Run the v1.1 reward-hacking judges inside the harbor verifier container,
-# authenticated with an OpenAI API key (OPENAI_API_KEY / CODEX_API_KEY)
-# instead of the condor pipeline's ChatGPT-subscription auth.json.
+# authenticated with an API key instead of the condor pipeline's
+# ChatGPT-subscription auth.json. Two providers are supported, selected by
+# which credential is present in the verifier env (see [verifier.env] in
+# task.toml, filled by adapter.py --api-provider):
+#   - OPENROUTER_API_KEY  -> judges run gpt-5.6-terra through OpenRouter. codex
+#                            gets a custom model provider (base_url
+#                            https://openrouter.ai/api/v1, Responses wire API)
+#                            via a private CODEX_HOME, and the judge model id is
+#                            provider-prefixed (openai/gpt-5.6-terra). Nothing
+#                            touches api.openai.com.
+#   - OPENAI_API_KEY / CODEX_API_KEY -> the original direct-OpenAI path.
+# OPENROUTER_API_KEY takes precedence when both are set.
 #
 # This is the harbor counterpart of src/judges/run_judges.sh + judge_lib.sh:
 # same judges, same confs, same prompts (via the unmodified
@@ -60,10 +70,41 @@ fi
 
 mkdir -p "$LOGS_DIR"
 
-if [ -z "${CODEX_API_KEY:-${OPENAI_API_KEY:-}}" ]; then
-    echo "run_judges_apikey: WARNING no OPENAI_API_KEY/CODEX_API_KEY — skipping all judges (fail-open)" >&2
+JUDGE_PROVIDER=""
+if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+    JUDGE_PROVIDER="openrouter"
+elif [ -n "${CODEX_API_KEY:-${OPENAI_API_KEY:-}}" ]; then
+    JUDGE_PROVIDER="openai"
+else
+    echo "run_judges_apikey: WARNING no OPENROUTER_API_KEY / OPENAI_API_KEY / CODEX_API_KEY — skipping all judges (fail-open)" >&2
     exit 0
 fi
+
+# Extra codex flags per provider (empty for direct OpenAI).
+PROVIDER_ARGS=()
+if [ "$JUDGE_PROVIDER" = "openrouter" ]; then
+    # Private codex home so the provider config cannot collide with anything
+    # else in the image, and so the agent's codex settings can never leak in.
+    export CODEX_HOME="${JUDGE_CODEX_HOME:-/tmp/codex-judge-home}"
+    mkdir -p "$CODEX_HOME"
+    cat > "$CODEX_HOME/config.toml" <<'TOML'
+# Written by run_judges_apikey.sh: route the reward-hacking judges through
+# OpenRouter. Verified 2026-09-21 with codex exec + openai/gpt-5.6-terra
+# (tool calls, xhigh reasoning and reasoning summaries all work on the
+# Responses wire API; the "chat" wire API does not).
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+TOML
+    PROVIDER_ARGS=(-c model_provider=openrouter)
+    # codex must not be able to fall back to a (possibly stale) OpenAI credential.
+    unset CODEX_API_KEY OPENAI_API_KEY
+fi
+echo "run_judges_apikey: provider=$JUDGE_PROVIDER"
 
 BENCHMARK_ID=$(python3 -c "import json; print(json.load(open('$TESTS/metadata.json'))['benchmark_id'])")
 MODEL_ID=$(python3 -c "import json; print(json.load(open('$TESTS/metadata.json'))['model_id'])")
@@ -174,6 +215,10 @@ for judge in "${ALL_JUDGES[@]}"; do
     JUDGE_OUTPUT_ID=$(grep -m1 '^JUDGE_OUTPUT_ID=' "$conf" | cut -d'"' -f2)
     JUDGE_MODEL=$(grep -m1 '^JUDGE_MODEL=' "$conf" | cut -d'"' -f2 || true)
     JUDGE_MODEL="${JUDGE_MODEL:-$DEFAULT_JUDGE_MODEL}"
+    if [ "$JUDGE_PROVIDER" = "openrouter" ]; then
+        # OpenRouter model slugs are provider-prefixed; judge.conf stays pristine.
+        case "$JUDGE_MODEL" in */*) ;; *) JUDGE_MODEL="openai/$JUDGE_MODEL" ;; esac
+    fi
     JUDGE_EFFORT=$(grep -m1 '^JUDGE_REASONING_EFFORT=' "$conf" | cut -d'"' -f2 || true)
     JUDGE_EFFORT="${JUDGE_EFFORT:-$DEFAULT_REASONING_EFFORT}"
     JUDGE_CODEX_VERSION=$(grep -m1 '^JUDGE_CODEX_VERSION=' "$conf" | cut -d'"' -f2 || true)
@@ -197,7 +242,7 @@ for judge in "${ALL_JUDGES[@]}"; do
     fi
 
     echo ""
-    echo "=== Judge: $judge (model=$JUDGE_MODEL, effort=$JUDGE_EFFORT, codex=$($codex_bin --version 2>/dev/null || echo '?')) ==="
+    echo "=== Judge: $judge (provider=$JUDGE_PROVIDER, model=$JUDGE_MODEL, effort=$JUDGE_EFFORT, codex=$($codex_bin --version 2>/dev/null || echo '?')) ==="
 
     PROMPT=$(python3 "$JUDGES_DIR/get_judge_prompt.py" \
         --judge "$judge" --benchmark-id "$BENCHMARK_ID" --model "$MODEL_ID" \
@@ -217,6 +262,7 @@ for judge in "${ALL_JUDGES[@]}"; do
         cd "$WORKSPACE"
         timeout -k 30 "$JUDGE_TIMEOUT_SEC" \
             "$codex_bin" --search -a never exec --json \
+            ${PROVIDER_ARGS[@]+"${PROVIDER_ARGS[@]}"} \
             -c model_reasoning_summary=detailed \
             -c model_reasoning_effort="$JUDGE_EFFORT" \
             --skip-git-repo-check --yolo --model "$JUDGE_MODEL" "$PROMPT" \
