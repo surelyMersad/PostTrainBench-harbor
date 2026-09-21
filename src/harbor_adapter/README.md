@@ -11,8 +11,8 @@ This adapter generates [Harbor](https://harborframework.com)-compatible tasks fo
 | aime2025 | AIME 2025 | inspect-ai | |
 | gpqamain | GPQA | inspect-ai | |
 | bfcl | Berkeley Function Calling Leaderboard | inspect-ai | Includes `bfcl_evaluation_code.py` via task_context |
-| arenahardwriting | Arena-Hard-v2.0 (Writing) | vLLM + OpenAI judge | Requires `OPENAI_API_KEY` for agent |
-| healthbench | HealthBench | vLLM + OpenAI judge | Requires `OPENAI_API_KEY` for agent |
+| arenahardwriting | Arena-Hard-v2.0 (Writing) | vLLM + LLM grader | Agent also gets the grader key (see `--api-provider`) |
+| healthbench | HealthBench | vLLM + LLM grader | Agent also gets the grader key (see `--api-provider`) |
 
 ## Supported Models
 
@@ -50,6 +50,10 @@ python run_adapter.py --benchmark gsm8k --model qwen3-1.7b --output ./tasks
 # Or generate all 28 task combinations
 python run_adapter.py --all --output ./tasks
 
+# Route the LLM graders (healthbench, arenahardwriting) and the v1.1 judges
+# through OpenRouter instead of api.openai.com (default: --api-provider openai)
+python run_adapter.py --all --api-provider openrouter --output ./tasks
+
 # List available benchmarks and models
 python run_adapter.py --list
 ```
@@ -57,9 +61,12 @@ python run_adapter.py --list
 ### 2. Set API keys
 
 ```bash
-python -m modal setup                # Modal cloud setup
-export ANTHROPIC_API_KEY=<your-key>  # For Claude agent
-export OPENAI_API_KEY=<your-key>     # For contamination judge (codex CLI) + arenahardwriting/healthbench eval
+python -m modal setup                 # Modal cloud setup
+export XAI_API_KEY=<your-key>         # grok-build agent (or ANTHROPIC_API_KEY for claude-code)
+export HF_TOKEN=<your-token>          # gated HF assets: google/gemma-3-4b-pt, Idavidrein/gpqa
+# Grader + judge key -- ONE of the two, matching --api-provider at generation time:
+export OPENAI_API_KEY=<your-key>      # --api-provider openai (default)
+export OPENROUTER_API_KEY=<your-key>  # --api-provider openrouter
 ```
 
 ### 3. Run with Harbor
@@ -85,11 +92,33 @@ harbor run \
 
 | Key | Used By | Required For |
 |-----|---------|-------------|
-| `ANTHROPIC_API_KEY` | Agent (Claude) | All benchmarks |
-| `OPENAI_API_KEY` | Contamination judge (codex CLI), evaluation judge | All benchmarks (judge), arenahardwriting/healthbench (agent eval) |
+| `XAI_API_KEY` / `ANTHROPIC_API_KEY` | Agent (grok-build / claude-code) | All benchmarks (forwarded by harbor from the host) |
+| `HF_TOKEN` | Agent + verifier | gemma-3-4b tasks (gated base model), gpqamain (gated dataset) |
+| `OPENAI_API_KEY` | v1.1 judges (codex CLI), LLM graders | `--api-provider openai` (default) |
+| `OPENROUTER_API_KEY` | v1.1 judges (codex CLI via OpenRouter), LLM graders | `--api-provider openrouter` |
 
-- The verifier receives `OPENAI_API_KEY` as both `OPENAI_API_KEY` and `CODEX_API_KEY` (codex CLI reads `CODEX_API_KEY`).
-- For arenahardwriting and healthbench, `OPENAI_API_KEY` is also passed to the agent environment since their `evaluate.py` scripts call the OpenAI API for judging.
+The grader/judge provider is chosen at task generation time
+(`run_adapter.py --api-provider {openai,openrouter}`) and baked into each
+task's `task.toml`; regenerate the tasks to switch.
+
+- **openai** (default): the verifier receives `OPENAI_API_KEY` as both
+  `OPENAI_API_KEY` and `CODEX_API_KEY` (codex CLI reads `CODEX_API_KEY`).
+  Graders use `evaluate.py`.
+- **openrouter**: the verifier receives only `OPENROUTER_API_KEY`. The graded
+  benchmarks get `evaluate_openrouter.py` installed as the task's
+  `evaluate.py`, and `run_judges_apikey.sh` gives codex a private
+  `CODEX_HOME` with an `openrouter` model provider (Responses wire API at
+  `https://openrouter.ai/api/v1`) and a provider-prefixed judge model id
+  (`openai/gpt-5.6-terra`); nothing reaches `api.openai.com`.
+- Exactly one provider's key is passed. The healthbench grader prefers
+  `OPENAI_API_KEY` whenever it is set, so an OpenRouter key stored under that
+  name would be sent to `api.openai.com` and fail with 401. The template's
+  `[verifier.env]` holds a `# @@GRADER_API_ENV@@` marker that the adapter
+  replaces with the right line.
+- For arenahardwriting and healthbench the same grader key is also passed to
+  the agent environment (`[environment.env]`), since their `evaluate.py`
+  calls the grader during the run; the task instructions permit it for
+  evaluation only.
 
 ## Task Structure
 
@@ -162,10 +191,13 @@ The verifier runs the four v1.1 judges from `src/judges/` after the agent
 finishes, via `tests/run_judges_apikey.sh` — the harbor counterpart of the
 condor pipeline's inline judge phase. Same judges, confs, prompts, and
 tools (`judges_repo/` in the verifier image is a pristine copy), but
-authenticated with `OPENAI_API_KEY` from `[verifier.env]` instead of a
+authenticated with an API key from `[verifier.env]` instead of a
 ChatGPT-subscription `auth.json`, and executed directly in the verifier
 container instead of an apptainer sandbox. The judge model
-(`gpt-5.6-terra`, codex CLI 0.144.5) is available on standard API keys.
+(`gpt-5.6-terra`, codex CLI 0.144.5) is reached directly with
+`OPENAI_API_KEY`, or through OpenRouter as `openai/gpt-5.6-terra` with
+`OPENROUTER_API_KEY` (`--api-provider openrouter`); the runner picks the
+provider from whichever key is present, OpenRouter first.
 
 | Judge | Verdict file | Checks |
 |---|---|---|
