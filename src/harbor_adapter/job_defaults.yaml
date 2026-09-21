@@ -1,0 +1,30 @@
+# Infrastructure hardening shared by every PostTrainBench harbor job.
+# Layer it UNDER the run config (later -c files override earlier ones; lists append):
+#
+#   harbor run -c job_defaults.yaml -c configs/<run>.yaml -y
+#
+# Lessons from the 2026-09-20 sweeps (168 trials): ~25% of attempts were lost to
+# Modal exec-stream failures, slow sandbox starts, and 84 runs ending in the same
+# minute. None of these are task failures, so retry them and spread the load.
+
+# Retry infrastructure failures only. Never retry the agent's own 10h timeout,
+# verifier timeouts, or non-zero agent exits -- those are results.
+retry:
+  max_retries: 2
+  include_exceptions:
+  - AgentSetupTimeoutError      # apt/grok install slower than the setup timeout under load
+  - HealthcheckError            # sandbox up but harbor's 5s healthcheck exec never answered
+  - InternalError               # modal: "Failed to read exec stdio stream"
+  - NotFoundError               # modal: sandbox already shut down before collection
+  - RewardFileNotFoundError     # verifier never wrote reward.txt (infra, not a 0 score)
+  - RuntimeError                # harbor transfer/archive failures (empty stderr, code -1)
+  min_wait_sec: 60
+  max_wait_sec: 300
+
+# Space consecutive trial starts 20s apart: 42 trials spread over ~14 min, so
+# their 10h deadlines, verifier launches and multi-GB log transfers do too.
+# (Requires harbor >= the feat/grok-build-reprompt fork with start_stagger_sec.)
+start_stagger_sec: 20
+
+# Agent setup timeout 360s -> 900s (grok CLI install + apt on a busy Modal region).
+agent_setup_timeout_multiplier: 2.5

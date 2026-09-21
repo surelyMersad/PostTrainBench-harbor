@@ -134,6 +134,10 @@ exclude = [
     ".wandb",
     # Training output dirs commonly produced by HF Trainer / Hydra:
     "checkpoint-*",
+    # Agents' own checkpoint dirs. In the 2026-09-20 sweeps 79 of 137
+    # workspaces had one; none contained code, several held multi-GB
+    # weights/optimizer state, and their HF-cache symlinks broke the transfer.
+    "checkpoints",
     "runs",
     "outputs",
     "output",

@@ -64,6 +64,15 @@ export OPENAI_API_KEY=<your-key>     # For contamination judge (codex CLI) + are
 
 ### 3. Run with Harbor
 
+Layer `job_defaults.yaml` (infra retries, staggered starts, longer agent setup
+timeout -- see the comments in that file) under your own run config:
+
+```bash
+harbor run -c job_defaults.yaml -c configs/my-sweep.yaml -y
+```
+
+Or for a single task without a config file:
+
 ```bash
 harbor run \
     --path ./tasks/posttrainbench-gsm8k-qwen3-1.7b \
